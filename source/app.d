@@ -51,9 +51,6 @@ HTTPServerRequestDelegateS proxyRequest()
 			creq.method = req.method;
 			creq.headers = req.headers.dup;
 			//creq.headers["Connection"] = "keep-alive";
-			//creq.headers["Host"] = rurl.host;
-			//if (true && "Accept-Encoding" in creq.headers) // TODO: omit gzip support?
-			//	creq.headers.remove("Accept-Encoding");
 			if (auto pfh = "X-Forwarded-Host" !in creq.headers) creq.headers["X-Forwarded-Host"] = req.headers["Host"];
 			if (auto pfp = "X-Forwarded-Proto" !in creq.headers) creq.headers["X-Forwarded-Proto"] = req.tls ? "https" : "http";
 			if (auto pff = "X-Forwarded-For" in req.headers) creq.headers["X-Forwarded-For"] = *pff ~ ", " ~ req.peer;
@@ -113,21 +110,22 @@ HTTPServerRequestDelegateS proxyRequest()
 
 			// to perform a verbatim copy of the client response
 			if ("Content-Length" in cres.headers) {
+                auto bodySize = cres.headers["Content-Length"].to!size_t();
+
 				if ("Content-Encoding" in res.headers) res.headers.remove("Content-Encoding");
 				foreach (key, value; cres.headers) {
 					if (icmp2(key, "Connection") != 0)
 						res.headers[key] = value;
 				}
-
-				auto size = cres.headers["Content-Length"].to!size_t();
-				if (res.isHeadResponse) res.writeVoidBody();
-                else if (size == 0)
+				
+				if (res.isHeadResponse)
+                    res.writeVoidBody();
+                else if (bodySize == 0)
                     res.writeBody(cast(ubyte[])"", null);
 				else
                 {
-                    writeln("WARNING: FISHY PATH!");
                     cres.readRawBody((scope reader) {
-                        res.writeRawBody(reader, size);
+                        res.writeRawBody(reader, bodySize);
                     });
                 }
 				assert(res.headerWritten);
