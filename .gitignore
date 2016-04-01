@@ -45,3 +45,15 @@ $RECYCLE.BIN/
 Network Trash Folder
 Temporary Items
 .apdisk
+
+.dub
+docs.json
+__dummy.html
+*.o
+*.obj
+
+dub.selections.json
+*.dll
+steam_proxy_vibed.exe
+*.sln
+*.visualdproj
