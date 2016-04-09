@@ -34,8 +34,8 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
         // TODO: Remove any other fields? Transfer-Encoding?
         // TODO: Any special handling of "Host" field? For now we'll just assume we can always pass on the original request one
         // Some will just naturally get overwritten when we write the body
-        if (icmp2(key, "Connection") != 0 ||     // Connection strategy is peer to peer
-            icmp2(key, "Accept-Encoding") != 0)  // Avoid compressed responses as this path is potentially bugger in vibe.d currently
+        if (icmp2(key, "Connection") != 0 &&     // Connection strategy is peer to peer
+            icmp2(key, "Accept-Encoding") != 0)  // Similar with encoding strategy - we're going to decode in the middle
         {
             req.headers[key] = value;
         }
@@ -65,39 +65,8 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
     // Otherwise don't write any body
 }
 
-void setup_upstream_response(scope HTTPClientResponse upstream_res, scope HTTPServerResponse res)
+void setup_response(scope HTTPClientResponse upstream_res, scope HTTPServerResponse res)
 {
-    // TODO: Decide whether to cache this response
-    // For consistency, should we just always take the same path here?
-    // i.e. do the request and cache it, then read it from the cache to satisfy the original
-    // request? In theory the file cache should handle this reasonably well. If not we can
-    // add some logic to the caching layer, but the advantage is guaranteed same behavior
-    // for the "first" client that requests something and later ones that hit the cache.
-    // That said, we also want as much consistency between the cached and not cached
-    // request paths as possible, so there's no perfect answer.
-    // NOTE: We choose the cache the upstream response rather than the modified response
-    // that we send to the client here. This means slightly more overhead as even cache
-    // hits have to run through the logic below again, but it means that the data in the
-    // cache is far less coupled to any logic changes in the proxy code. If this code
-    // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
-    // to change.
-
-    // Only cache "200" responses
-    // Only cache "GET" and "HEAD" requests
-    // Respect Cache-control: no cache request?
-    // We need to ignore "expires" specifically for Steam as it is always set to immediate
-
-
-    //auto cached_response = Bson([
-    //"response": (cast(HTTPResponse)upstream_res).serializeToJson,
-    //"field2": Bson(42),);
-
-    //auto cached_response = Json([
-    //    "response": (cast(HTTPResponse)upstream_res).serializeToJson()
-    //]);
-    //writeln(cached_response.toPrettyString());
-
-
     // Copy relevant response headers
     res.statusCode = upstream_res.statusCode;
     foreach (key, value; upstream_res.headers) {
@@ -162,6 +131,9 @@ HTTPServerRequestDelegateS proxy_request()
 
         // TODO: Decide whether to use cached response
 
+        // TODO: Detect and avoid proxy "loops" (i.e. requests back to ourself)
+        // Not sure how these are initially getting triggered, which also needs tracking down...
+
         void upstream_request(scope HTTPClientRequest upstream_req)
         {
             setup_upstream_request(req, upstream_req);
@@ -170,11 +142,35 @@ HTTPServerRequestDelegateS proxy_request()
 		void upstream_response(scope HTTPClientResponse upstream_res)
 		{
             // Write the request right by the response to avoid trying to match them up manually
-            writefln("REQUEST: %s", req.toString());
+            writefln("REQUEST: %s from %s, host %s", req.toString(), req.clientAddress.toAddressString(), req.host);
             writefln("UPSTREAM RESPONSE: %s", upstream_res.toString());
             writeln();
+            
+            // TODO: Decide whether to cache this response
+            // Only cache "200" responses
+            // Only cache "GET" and "HEAD" requests (ugh @ "OPTIONS" and other weirdness??)
+            // Respect Cache-control: no cache request?
+            // We need to ignore "expires" specifically for Steam as it is always set to immediate
 
-            setup_upstream_response(upstream_res, res);
+            // NOTE: We choose the cache the upstream response rather than the modified response
+            // that we send to the client here. This means slightly more overhead as even cache
+            // hits have to run through the logic below again, but it means that the data in the
+            // cache is far less coupled to any logic changes in the proxy code. If this code
+            // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
+            // to change.
+
+            //auto cached_response = Bson([
+            //"response": (cast(HTTPResponse)upstream_res).serializeToJson,
+            //"field2": Bson(42),);
+
+            //auto cached_response = Json([
+            //    "response": (cast(HTTPResponse)upstream_res).serializeToJson()
+            //]);
+            //writeln(cached_response.toPrettyString());
+
+            // TODO: setup_response will take data based on a "cached response" intermediary,
+            // even if the response does not end up being cached at all.
+            setup_response(upstream_res, res);
 		}
 
         // Disable keep-alive for the moment - potentially just restrict the timeout in the future
