@@ -63,6 +63,85 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
         upstream_req.writeBody(req.bodyReader);
     }
     // Otherwise don't write any body
+}
+
+void setup_upstream_response(scope HTTPClientResponse upstream_res, scope HTTPServerResponse res)
+{
+    // TODO: Decide whether to cache this response
+    // For consistency, should we just always take the same path here?
+    // i.e. do the request and cache it, then read it from the cache to satisfy the original
+    // request? In theory the file cache should handle this reasonably well. If not we can
+    // add some logic to the caching layer, but the advantage is guaranteed same behavior
+    // for the "first" client that requests something and later ones that hit the cache.
+    // That said, we also want as much consistency between the cached and not cached
+    // request paths as possible, so there's no perfect answer.
+    // NOTE: We choose the cache the upstream response rather than the modified response
+    // that we send to the client here. This means slightly more overhead as even cache
+    // hits have to run through the logic below again, but it means that the data in the
+    // cache is far less coupled to any logic changes in the proxy code. If this code
+    // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
+    // to change.
+
+    // Only cache "200" responses
+    // Only cache "GET" and "HEAD" requests
+    // Respect Cache-control: no cache request?
+    // We need to ignore "expires" specifically for Steam as it is always set to immediate
+
+
+    //auto cached_response = Bson([
+    //"response": (cast(HTTPResponse)upstream_res).serializeToJson,
+    //"field2": Bson(42),);
+
+    //auto cached_response = Json([
+    //    "response": (cast(HTTPResponse)upstream_res).serializeToJson()
+    //]);
+    //writeln(cached_response.toPrettyString());
+
+
+    // Copy relevant response headers
+    res.statusCode = upstream_res.statusCode;
+    foreach (key, value; upstream_res.headers) {
+        // TODO: Remove any other fields? Transfer-Encoding?
+        // Some will just naturally get overwritten when we write the body
+        if (icmp2(key, "Connection") != 0)
+            res.headers[key] = value;
+    }
+
+    if (res.isHeadResponse) {
+        res.writeVoidBody();
+        return;
+    }
+
+    // If content length is specified, perform an almost raw copy of the response
+    if ("Content-Length" in upstream_res.headers)
+    {
+        auto bodySize = upstream_res.headers["Content-Length"].to!size_t();
+
+        if (bodySize == 0)
+            res.writeBody(cast(ubyte[])"", null);
+        else
+        {
+            auto payload = upstream_res.bodyReader.readAll();
+            res.writeBody(payload);
+
+            //cres.readRawBody((scope reader) {
+            //    res.writeRawBody(reader, bodySize);
+            //});
+        }
+        assert(res.headerWritten);
+
+        //writeln("PROXY RESPONSE HEADERS:");
+        //pretty_print_headers(res.headers);
+        //writeln();
+
+        return;
+    }
+
+    writeln("NOT IMPLEMENTED");
+    assert(false);
+    //throw new HTTPStatusException(HTTPStatus.notImplemented);
+}
+
 
 HTTPServerRequestDelegateS proxy_request()
 {
@@ -95,79 +174,7 @@ HTTPServerRequestDelegateS proxy_request()
             writefln("UPSTREAM RESPONSE: %s", upstream_res.toString());
             writeln();
 
-            // TODO: Decide whether to cache this response
-            // For consistency, should we just always take the same path here?
-            // i.e. do the request and cache it, then read it from the cache to satisfy the original
-            // request? In theory the file cache should handle this reasonably well. If not we can
-            // add some logic to the caching layer, but the advantage is guaranteed same behavior
-            // for the "first" client that requests something and later ones that hit the cache.
-            // That said, we also want as much consistency between the cached and not cached
-            // request paths as possible, so there's no perfect answer.
-            // NOTE: We choose the cache the upstream response rather than the modified response
-            // that we send to the client here. This means slightly more overhead as even cache
-            // hits have to run through the logic below again, but it means that the data in the
-            // cache is far less coupled to any logic changes in the proxy code. If this code
-            // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
-            // to change.
-
-            // Only cache "200" responses
-            // Only cache "GET" and "HEAD" requests
-            // Respect Cache-control: no cache request?
-            // We need to ignore "expires" specifically for Steam as it is always set to immediate
-
-
-            //auto cached_response = Bson([
-                //"response": (cast(HTTPResponse)upstream_res).serializeToJson,
-                //"field2": Bson(42),);
-
-            //auto cached_response = Json([
-            //    "response": (cast(HTTPResponse)upstream_res).serializeToJson()
-            //]);
-            //writeln(cached_response.toPrettyString());
-
-
-            // Copy relevant response headers
-            res.statusCode = upstream_res.statusCode;
-            foreach (key, value; upstream_res.headers) {
-                // TODO: Remove any other fields? Transfer-Encoding?
-                // Some will just naturally get overwritten when we write the body
-                if (icmp2(key, "Connection") != 0)
-                    res.headers[key] = value;
-            }
-
-            if (res.isHeadResponse) {
-                res.writeVoidBody();
-                return;
-            }
-
-            // If content length is specified, perform an almost raw copy of the response
-			if ("Content-Length" in upstream_res.headers)
-            {
-                auto bodySize = upstream_res.headers["Content-Length"].to!size_t();
-				
-                if (bodySize == 0)
-                    res.writeBody(cast(ubyte[])"", null);
-				else
-                {
-                    auto payload = upstream_res.bodyReader.readAll();
-                    res.writeBody(payload);
-
-                    //cres.readRawBody((scope reader) {
-                    //    res.writeRawBody(reader, bodySize);
-                    //});
-                }
-				assert(res.headerWritten);
-
-                //writeln("PROXY RESPONSE HEADERS:");
-                //pretty_print_headers(res.headers);
-                //writeln();
-
-				return;
-			}
-			
-            writeln("NOT IMPLEMENTED");
-            assert(false);
-            //throw new HTTPStatusException(HTTPStatus.notImplemented);
+            setup_upstream_response(upstream_res, res);
 		}
 
         // Disable keep-alive for the moment - potentially just restrict the timeout in the future
