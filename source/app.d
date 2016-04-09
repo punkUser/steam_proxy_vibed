@@ -1,8 +1,14 @@
+import cached_response;
+
 import vibe.d;
 import std.stdio;
 
+shared static ResponseCache g_response_cache;
+
 shared static this()
 {
+    g_response_cache = new ResponseCache();
+
     auto router = new URLRouter;
     router.any("*", proxy_request());
 
@@ -21,17 +27,19 @@ static void pretty_print_headers(InetHeaderMap headers)
 
 
 void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest upstream_req)
-{
-    writefln("%s %s", req.method, req.requestURL);
-    //pretty_print_headers(req.headers);
-
-    // TODO: Any other headers we want to manipulate or not copy?
+{   
+    // Copy relevant request headers
     upstream_req.method = req.method;
-    upstream_req.headers = req.headers.dup;
-    upstream_req.headers["Connection"] = "keep-alive";
-
-    // Avoid compressed requests as this path is potentially a bit buggier in vibe.d currently
-    upstream_req.headers.removeAll("Accept-Encoding");
+    foreach (key, value; upstream_req.headers) {
+        // TODO: Remove any other fields? Transfer-Encoding?
+        // TODO: Any special handling of "Host" field? For now we'll just assume we can always pass on the original request one
+        // Some will just naturally get overwritten when we write the body
+        if (icmp2(key, "Connection") != 0 ||     // Connection strategy is peer to peer
+            icmp2(key, "Accept-Encoding") != 0)  // Avoid compressed responses as this path is potentially bugger in vibe.d currently
+        {
+            req.headers[key] = value;
+        }
+    }
 
     // Add standard proxy headers
     if (auto pri = "X-Real-IP" !in upstream_req.headers)
@@ -55,11 +63,6 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
         upstream_req.writeBody(req.bodyReader);
     }
     // Otherwise don't write any body
-
-    //writeln("PROXY REQUEST HEADERS:");
-    //pretty_print_headers(upstream_req.headers);
-    //writeln();
-}
 
 HTTPServerRequestDelegateS proxy_request()
 {
@@ -87,8 +90,10 @@ HTTPServerRequestDelegateS proxy_request()
 
 		void upstream_response(scope HTTPClientResponse upstream_res)
 		{
+            // Write the request right by the response to avoid trying to match them up manually
+            writefln("REQUEST: %s", req.toString());
             writefln("UPSTREAM RESPONSE: %s", upstream_res.toString());
-            //pretty_print_headers(cres.headers);
+            writeln();
 
             // TODO: Decide whether to cache this response
             // For consistency, should we just always take the same path here?
@@ -105,14 +110,20 @@ HTTPServerRequestDelegateS proxy_request()
             // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
             // to change.
 
+            // Only cache "200" responses
+            // Only cache "GET" and "HEAD" requests
+            // Respect Cache-control: no cache request?
+            // We need to ignore "expires" specifically for Steam as it is always set to immediate
+
+
             //auto cached_response = Bson([
                 //"response": (cast(HTTPResponse)upstream_res).serializeToJson,
                 //"field2": Bson(42),);
 
-            auto cached_response = Json([
-                "response": (cast(HTTPResponse)upstream_res).serializeToJson()
-            ]);
-            writeln(cached_response.toPrettyString());
+            //auto cached_response = Json([
+            //    "response": (cast(HTTPResponse)upstream_res).serializeToJson()
+            //]);
+            //writeln(cached_response.toPrettyString());
 
 
             // Copy relevant response headers
@@ -141,7 +152,6 @@ HTTPServerRequestDelegateS proxy_request()
                     auto payload = upstream_res.bodyReader.readAll();
                     res.writeBody(payload);
 
-
                     //cres.readRawBody((scope reader) {
                     //    res.writeRawBody(reader, bodySize);
                     //});
@@ -160,7 +170,12 @@ HTTPServerRequestDelegateS proxy_request()
             //throw new HTTPStatusException(HTTPStatus.notImplemented);
 		}
 
-		requestHTTP(rurl, &upstream_request, &upstream_response);
+        // Disable keep-alive for the moment - potentially just restrict the timeout in the future
+        // TODO: Cache this settings object somewhere maybe - it's immutable really
+        HTTPClientSettings settings = new HTTPClientSettings;
+        settings.defaultKeepAliveTimeout = 0.seconds; // closes connection immediately after receiving the data.
+
+		requestHTTP(rurl, &upstream_request, &upstream_response, settings);
 	}
 
 	return &handleRequest;
