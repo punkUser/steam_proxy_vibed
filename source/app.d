@@ -81,34 +81,8 @@ void setup_response(scope HTTPClientResponse upstream_res, scope HTTPServerRespo
         return;
     }
 
-    // If content length is specified, perform an almost raw copy of the response
-    if ("Content-Length" in upstream_res.headers)
-    {
-        auto bodySize = upstream_res.headers["Content-Length"].to!size_t();
-
-        if (bodySize == 0)
-            res.writeBody(cast(ubyte[])"", null);
-        else
-        {
-            auto payload = upstream_res.bodyReader.readAll();
-            res.writeBody(payload);
-
-            //cres.readRawBody((scope reader) {
-            //    res.writeRawBody(reader, bodySize);
-            //});
-        }
-        assert(res.headerWritten);
-
-        //writeln("PROXY RESPONSE HEADERS:");
-        //pretty_print_headers(res.headers);
-        //writeln();
-
-        return;
-    }
-
-    writeln("NOT IMPLEMENTED");
-    assert(false);
-    //throw new HTTPStatusException(HTTPStatus.notImplemented);
+    auto payload = upstream_res.bodyReader.readAll();
+    res.writeBody(payload);
 }
 
 
@@ -159,14 +133,12 @@ HTTPServerRequestDelegateS proxy_request()
             // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
             // to change.
 
-            //auto cached_response = Bson([
-            //"response": (cast(HTTPResponse)upstream_res).serializeToJson,
-            //"field2": Bson(42),);
-
-            //auto cached_response = Json([
-            //    "response": (cast(HTTPResponse)upstream_res).serializeToJson()
-            //]);
-            //writeln(cached_response.toPrettyString());
+            //auto cached_response = [
+            //    "response": (cast(HTTPResponse)upstream_res).serializeToJson(),
+            //    "body": Json("test 123")
+            //];
+            //writeln(Json(cached_response).toPrettyString());
+            //HTTPResponse test = deserialize!(JsonSerializer, HTTPResponse)(cached_response["response"]);
 
             // TODO: setup_response will take data based on a "cached response" intermediary,
             // even if the response does not end up being cached at all.
