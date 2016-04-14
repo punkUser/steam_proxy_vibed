@@ -113,7 +113,8 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
         // We always create our own "response" object just for consistency of the paths here
         // Could elide this if it becomes an issue in the future, but shouldn't be a problem
         // for our usage and robustness is more important.
-        auto cached_response = new CachedHTTPResponse(upstream_res);
+        auto cached_response = new CachedHTTPResponse();
+        cached_response.create(upstream_res);
 
         // TODO: Probably best to separate any following code into another function that only
         // depends on the cached_response, but good enough for now.
