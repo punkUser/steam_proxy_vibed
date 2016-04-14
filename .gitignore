@@ -48,6 +48,7 @@ Temporary Items
 
 .dub
 .vs
+cache
 docs.json
 __dummy.html
 *.o

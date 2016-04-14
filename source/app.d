@@ -14,7 +14,7 @@ shared static this()
 
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
-    settings.options = HTTPServerOption.none; //HTTPServerOption.parseURL;
+    settings.options = HTTPServerOption.parseURL;
 
 	listenHTTP(settings, router);
 }
@@ -30,14 +30,14 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
 {   
     // Copy relevant request headers
     upstream_req.method = req.method;
-    foreach (key, value; upstream_req.headers) {
+    foreach (key, value; req.headers) {
         // TODO: Remove any other fields? Transfer-Encoding?
         // TODO: Any special handling of "Host" field? For now we'll just assume we can always pass on the original request one
         // Some will just naturally get overwritten when we write the body
         if (icmp2(key, "Connection") != 0 &&     // Connection strategy is peer to peer
             icmp2(key, "Accept-Encoding") != 0)  // Similar with encoding strategy - we're going to decode in the middle
         {
-            req.headers[key] = value;
+            upstream_req.headers[key] = value;
         }
     }
 
@@ -171,16 +171,16 @@ void cached_proxy_request(scope HTTPServerRequest req, scope HTTPServerResponse 
     // TODO: Decide whether to use cached response
 
     // Determine cache key
-    // For steam, we just use the URL, not host (they are mirrors) or query params (per-user security stuff)
+    // For Steam, we just use the path portion of the request, not host (they are mirrors) or query params (per-user security stuff)
     // TODO: Obviously we should constrain/specialize this logic for just steam requests for robustness even though
     // we have no intention of implementing a general-purpose proxy cache here.
-    string cache_key = req.requestURL;
+    string cache_key = req.path;
     auto cached_response = g_response_cache.find(cache_key);
 
-    if (cached_response)
+    if (!cached_response.isNull())
     {
         writeln("CACHE HIT!");
-        setup_response(*cached_response, res);
+        setup_response(cached_response, res);
     }
     else
     {

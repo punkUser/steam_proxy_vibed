@@ -1,6 +1,0 @@
-name "steam_proxy_vibed"
-description "A simple vibe.d Steam proxy cache."
-copyright "Copyright © 2016, Andrew Lauritzen"
-authors "Andrew Lauritzen"
-dependency "vibe-d" version="~>0.7.28"
-versions "VibeDefaultMain"
