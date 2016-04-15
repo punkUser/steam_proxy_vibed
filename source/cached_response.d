@@ -4,6 +4,7 @@ import std.stdio;
 import std.digest.md;
 import std.file : mkdirRecurse;
 import std.exception;
+import std.mmfile;
 import core.memory;
 import vibe.d;
 
@@ -18,14 +19,11 @@ class CachedHTTPResponse
     {
         status_code = upstream_res.statusCode;
         headers = upstream_res.headers.dup;
-
-        body_payload = upstream_res.bodyReader.readAll();
     }
 
     // From HTTPResponse
     public int status_code;
     public InetHeaderMap headers;
-    public ubyte[] body_payload;
 };
 
 // The monolithic cache object that handles checking for requests and caching the results
@@ -40,26 +38,33 @@ class ResponseCache
         m_mutex = new TaskReadWriteMutex();
     }
 
-    public Nullable!CachedHTTPResponse find(string key)
+    public bool find(string key,
+                     void delegate(CachedHTTPResponse response, const(ubyte)[] body_payload) hit_handler)
     {
         //m_mutex.reader.lock();
         //scope(exit)m_mutex.reader.unlock();
         //return (key in m_memory_cache);
         
         auto path = cache_path(key);
-        if (!existsFile(path)) return Nullable!CachedHTTPResponse();
+        if (!existsFile(path)) return false;
 
-        auto data = readFile(path);
-        auto bson = Bson(Bson.Type.object, assumeUnique(data));
+        //auto data = readFile(path);
+        // TODO: Any issues with using D MmFile instead of something that understand vibe and yielding?
+        auto mmfile = new MmFile(path.toNativeString());
+        scope(exit) destroy(mmfile);
+        auto bson = Bson(Bson.Type.object, assumeUnique(cast(ubyte[])mmfile[]));
         auto response = deserializeBson!CachedHTTPResponse(bson);
-        return Nullable!CachedHTTPResponse(response);
+
+        hit_handler(response, cast(const(ubyte)[])mmfile[bson.data.length .. cast(uint)mmfile.length]);
+
+        return true;
     }
 
     // TODO: Probably need some sort of atomic "find or lock" ability to avoid races or duplicated work
 
     // TODO: Some way to lock a specific item in the cache while it is initially being filled
     // to avoid redoing work if multiple people request the same data at once.
-    public void cache(string key, CachedHTTPResponse response)
+    public void cache(string key, CachedHTTPResponse response, InputStream body_reader)
     {
         // TODO: Could reduce the scope of this lock if perf ever became an issue to only the
         // initial insertion of an empty slot into the map.
@@ -68,12 +73,15 @@ class ResponseCache
         //m_memory_cache[key] = response;
 
         // TODO: Handle races or existence of file
+        // TODO: At the very least, createTempFile for writing, move to final location after atomicly
         auto path = cache_path(key);
         auto bson = response.serializeToBson();
         mkdirRecurse(path.parentPath.toNativeString()); // TODO: This is a standard D call rather than vibe... is this a problem at all?
-        writeFile(path, bson.data);
 
-        //writefln("SIZE OVERHEAD: %s", (bson.data.length - response.body_payload.length) / cast(float)response.body_payload.length);
+        auto file = openFile(path, FileMode.createTrunc);
+        file.write(bson.data);
+        file.write(body_reader);
+        file.close();
     }
 
     // Mapping of cache key -> file name
