@@ -6,6 +6,14 @@ import std.typecons;
 
 __gshared ResponseCache g_response_cache;
 
+enum UpstreamCacheStatus
+{
+    HIT = 0,
+    MISS_AND_CACHED,
+    MISS_AND_NOT_CACHED,
+    BYPASS,
+};
+
 shared static this()
 {
     g_response_cache = new ResponseCache();
@@ -15,15 +23,9 @@ shared static this()
 
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
-    settings.options = HTTPServerOption.parseURL;
+    settings.options = HTTPServerOption.parseURL | HTTPServerOption.distribute;
 
 	listenHTTP(settings, router);
-}
-
-static void pretty_print_headers(InetHeaderMap headers)
-{
-    foreach (k, v ; headers)
-        writefln("  %s: %s", k, v);
 }
 
 
@@ -31,7 +33,8 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
 {   
     // Copy relevant request headers
     upstream_req.method = req.method;
-    foreach (key, value; req.headers) {
+    foreach (key, value; req.headers)
+    {
         // TODO: Remove any other fields? Transfer-Encoding?
         // TODO: Any special handling of "Host" field? For now we'll just assume we can always pass on the original request one
         // Some will just naturally get overwritten when we write the body
@@ -65,18 +68,23 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
         // is why we try to avoid this path when proxying.
         upstream_req.writeBody(req.bodyReader);
     }
-    // Otherwise don't write any body
+    // Otherwise don't write any request body
 }
 
-void setup_response(T)(const(CachedHTTPResponse) upstream_res, T body_reader, scope HTTPServerResponse res)
+void setup_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T body_reader, scope HTTPServerResponse res)
 {
     // Copy relevant response headers
-    res.statusCode = upstream_res.status_code;
-    foreach (key, value; upstream_res.headers) {
+    res.statusCode = status_code;
+    foreach (key, value; upstream_headers)
+    {
         // TODO: Remove any other fields? Transfer-Encoding?
         // Some will just naturally get overwritten when we write the body
         if (icmp2(key, "Connection") != 0)
+        {
+            // NOTE: we need to dup the strings here as the response object passed in may be
+            // transient (i.e. memory mapped file, etc).
             res.headers[key.idup] = value.idup;
+        }
     }
 
     if (res.isHeadResponse) {
@@ -87,7 +95,8 @@ void setup_response(T)(const(CachedHTTPResponse) upstream_res, T body_reader, sc
     res.writeBody(body_reader);
 }
 
-void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key)
+// If cache_key is empty, response will never be cached
+UpstreamCacheStatus upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key = "")
 {
     // TODO: Detect and avoid proxy "loops" (i.e. requests back to ourself)
     // Not sure how these are initially getting triggered, which also needs tracking down...
@@ -103,6 +112,8 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
     HTTPClientSettings settings = new HTTPClientSettings;
     settings.defaultKeepAliveTimeout = 0.seconds; // closes connection immediately after receiving the data.
 
+    auto upstream_cache_status = UpstreamCacheStatus.MISS_AND_NOT_CACHED;
+
     requestHTTP(url,
         (scope HTTPClientRequest upstream_req)
         {
@@ -110,11 +121,6 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
         },
         (scope HTTPClientResponse upstream_res) 
         {
-            // Write the request right by the response to avoid trying to match them up manually
-            writefln("REQUEST: %s from %s, host %s", req.toString(), req.clientAddress.toAddressString(), req.host);
-            writefln("UPSTREAM RESPONSE: %s", upstream_res.toString());
-            writeln();
-
             // NOTE: We choose the cache the upstream response rather than the modified response
             // that we send to the client here. This means slightly more overhead as even cache
             // hits have to run through the logic below again, but it means that the data in the
@@ -122,77 +128,83 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
             // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
             // to change.
 
-            // TODO: Probably best to separate any following code into another function that only
-            // depends on the cached_response, but good enough for now.
-
-            // We always create our own "response" object just for consistency of the paths here
-            // Could elide this if it becomes an issue in the future, but shouldn't be a problem
-            // for our usage and robustness is more important.
-            auto cached_response = new CachedHTTPResponse();
-            cached_response.create(upstream_res);
-
             // Decide whether to cache this response
+            // NOTE: Logic based purely on the request should have been checked before calling
             bool cache =
+                (!cache_key.empty) &&
                 (req.method == HTTPMethod.GET) &&
                 (upstream_res.statusCode == HTTPStatus.OK);
+
             // TODO: Respect Cache-control: no cache request?
             // We need to ignore "expires" specifically for Steam as it is always set to immediate
 
             if (cache)
             {
-                writeln("CACHING RESPONSE...");
-                // NOTE: This is *destructive* on the data in bodyReader!
-                g_response_cache.cache(cache_key, cached_response, upstream_res.bodyReader);
+                // NOTE: This is *destructive* on the body data in upstream_res!
+                g_response_cache.cache(cache_key, upstream_res);
 
                 // Should now be in the cache, so reload it from there for this response
                 auto found = g_response_cache.find(cache_key,
-                    (CachedHTTPResponse response, const(ubyte)[] body_payload)
+                    (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
                     {
-                        writeln("CACHE HIT AFTER CACHING!");
-                        setup_response(response, body_payload, res);
+                        setup_response(response.status_code, response.headers, body_payload, res);
                     }
                 );
+
+                upstream_cache_status = UpstreamCacheStatus.MISS_AND_CACHED;
             }
             else
             {
                 // Don't cache, just pass through response
-                writeln("NON CACHE PASSTHROUGH!");
-                setup_response(cached_response, upstream_res.bodyReader, res);
+                setup_response(upstream_res.statusCode, upstream_res.headers, upstream_res.bodyReader, res);
             }
         },
         settings
     );
+
+    return upstream_cache_status;
 }
 
 
 void cached_proxy_request(scope HTTPServerRequest req, scope HTTPServerResponse res)
 {
-    // We don't currently support HTTP/1.0 clients
-    // TODO: There may be no really good reason we can't do this now since we do tend to read/write full bodies
-    // rather than chunked encoding, but keep it like this for now.
-    if (res.httpVersion == HTTPVersion.HTTP_1_0) {
-        throw new HTTPStatusException(HTTPStatus.httpVersionNotSupported);
-    }
+    bool response_written = false;
+    auto upstream_cache_status = UpstreamCacheStatus.BYPASS;
 
-    // TODO: Decide whether to use cached response
-
-    // Determine cache key
-    // For Steam, we just use the path portion of the request, not host (they are mirrors) or query params (per-user security stuff)
-    // TODO: Obviously we should constrain/specialize this logic for just steam requests for robustness even though
-    // we have no intention of implementing a general-purpose proxy cache here.
-    string cache_key = req.path;
-    auto found = g_response_cache.find(cache_key,
-        (CachedHTTPResponse response, const(ubyte)[] body_payload)
-        {
-            writeln("CACHE HIT!");
-            setup_response(response, body_payload, res);
-        }
-    );
-
-    if (!found)
+    // Decide whether to use cached responses for this request
+    string cache_key = "";
+    if (req.method == HTTPMethod.GET)
     {
-        writeln("CACHE MISS!");
-        // Forward the request upstream
-        upstream_request(req, res, cache_key);
+        // Determine cache key
+        // For Steam, we just use the path portion of the request, not host (they are mirrors) or query params (per-user security stuff)
+        // TODO: Obviously we should constrain/specialize this logic for just steam requests for robustness even though
+        // we have no intention of implementing a general-purpose proxy cache here.
+        cache_key = "steam/" ~ req.path;
+
+        // Check if we have it cached already
+        auto found = g_response_cache.find(cache_key,
+            (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
+            {
+                upstream_cache_status = UpstreamCacheStatus.HIT;
+                setup_response(response.status_code, response.headers, body_payload, res);
+                response_written = true;
+            }
+        );
     }
+
+    if (!response_written)
+    {
+        // Otherwise forward the response upstream
+        upstream_cache_status = upstream_request(req, res, cache_key);
+    }
+
+    // Log something sorta like standard Apache output, but doesn't need to be exact
+    writefln("%s - - [%s] \"%s\" %s %s \"%s\" \"%s\"",
+             req.clientAddress.toAddressString(),
+             Clock.currTime().toSimpleString(),
+             req.toString(),
+             res.statusCode,
+             res.headers.get("Content-Length", "0"),
+             upstream_cache_status,
+             req.host);
 }

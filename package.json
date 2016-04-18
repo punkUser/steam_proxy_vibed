@@ -4,10 +4,10 @@
 	"copyright": "Copyright © 2016, Andrew Lauritzen",
 	"authors": ["Andrew Lauritzen"],
 	"subConfigurations": {
-		"vibe-d": "libasync",
+		"vibe-d": "libevent",
 	},
 	"dependencies": {
 		"vibe-d": "~>0.7.28",
 	},
-	"versions": ["VibeDefaultMain", "VibeIdleCollect"],
+	"versions": ["VibeDefaultMain"],
 }

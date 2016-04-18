@@ -8,20 +8,8 @@ import std.mmfile;
 import core.memory;
 import vibe.d;
 
-class CachedHTTPResponse
+struct CachedHTTPResponse
 {
-    public this() {}
-
-    // Pulls all of the relevant data (including reads whole body!) from the given client
-    // upstream response and stores it in this object.
-    // Method rather than 
-    public void create(HTTPClientResponse upstream_res)
-    {
-        status_code = upstream_res.statusCode;
-        headers = upstream_res.headers.dup;
-    }
-
-    // From HTTPResponse
     public int status_code;
     public InetHeaderMap headers;
 };
@@ -29,22 +17,17 @@ class CachedHTTPResponse
 // The monolithic cache object that handles checking for requests and caching the results
 // NOTE: This object is intended to be thread safe (uses internal locking), and thus usage
 // with "__gshared" is likely.
+// TODO: This entire class is basically "static" right now since we (ab)use the file system
+// to do our locking and synchronization and so on. Could change the interface/design given that.
 class ResponseCache
 {
     public this()
     {
-        // TODO: Experiment with mutex policies, although it's hard to imagine a case where
-        // we should be high contention here given the latencies of network requests and so on.
-        m_mutex = new TaskReadWriteMutex();
     }
 
-    public bool find(string key,
-                     void delegate(CachedHTTPResponse response, const(ubyte)[] body_payload) hit_handler)
-    {
-        //m_mutex.reader.lock();
-        //scope(exit)m_mutex.reader.unlock();
-        //return (key in m_memory_cache);
-        
+    public static bool find(string key,
+        void delegate(scope CachedHTTPResponse response, const(ubyte)[] body_payload) hit_handler)
+    {        
         auto path = cache_path(key);
         if (!existsFile(path)) return false;
 
@@ -60,32 +43,40 @@ class ResponseCache
         return true;
     }
 
-    // TODO: Probably need some sort of atomic "find or lock" ability to avoid races or duplicated work
-
     // TODO: Some way to lock a specific item in the cache while it is initially being filled
     // to avoid redoing work if multiple people request the same data at once.
-    public void cache(string key, CachedHTTPResponse response, InputStream body_reader)
+    // NOTE: Destructively reads the body of the upstream response - thus the caller needs to
+    // call "find" to grab that data from the cache again if necessary.
+    public static void cache(string key, HTTPClientResponse upstream_res)
     {
-        // TODO: Could reduce the scope of this lock if perf ever became an issue to only the
-        // initial insertion of an empty slot into the map.
-        //m_mutex.writer.lock();
-        //scope(exit)m_mutex.writer.unlock();
-        //m_memory_cache[key] = response;
-
         // TODO: Handle races or existence of file
-        // TODO: At the very least, createTempFile for writing, move to final location after atomicly
-        auto path = cache_path(key);
-        auto bson = response.serializeToBson();
-        mkdirRecurse(path.parentPath.toNativeString()); // TODO: This is a standard D call rather than vibe... is this a problem at all?
 
-        auto file = openFile(path, FileMode.createTrunc);
+        // Create temp file for caching the response.
+        // NOTE: On Windows this seems to create the temporary file in the current directory...
+        // This is non-ideal, so we may want to roll our own with std.file.tempDir or similar
+        auto file = createTempFile();
+        scope(failure) file.close();
+
+        CachedHTTPResponse cached_response;
+        cached_response.status_code = upstream_res.statusCode;
+        cached_response.headers = upstream_res.headers.dup;
+        auto bson = cached_response.serializeToBson();
+
         file.write(bson.data);
-        file.write(body_reader);
+        file.write(upstream_res.bodyReader);
+
+        auto temp_file_path = file.path;
         file.close();
+
+        // Move temp file to the cached path
+        auto cached_path = cache_path(key);
+        // TODO: This is a standard D call rather than vibe... is this a problem at all?
+        mkdirRecurse(cached_path.parentPath.toNativeString());
+        moveFile(temp_file_path, cached_path, true);
     }
 
     // Mapping of cache key -> file name
-    private Path cache_path(string key)
+    private static Path cache_path(string key)
     {
         // For now we go with a simple scheme of MD5 the key, then store it in "cache/AB/CD" where
         // AB and CD are the first 4 digits of the hash (to make the file system a bit happier).
@@ -98,7 +89,4 @@ class ResponseCache
         string path_string = "cache/" ~ key;
         return Path(path_string);
     }
-
-    private TaskReadWriteMutex m_mutex;
-    private CachedHTTPResponse[string] m_memory_cache;
 };
