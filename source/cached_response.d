@@ -29,18 +29,27 @@ class ResponseCache
         void delegate(scope CachedHTTPResponse response, const(ubyte)[] body_payload) hit_handler)
     {        
         auto path = cache_path(key);
-        if (!existsFile(path)) return false;
+        //if (!existsFile(path)) return false;
 
-        //auto data = readFile(path);
-        // TODO: Any issues with using D MmFile instead of something that understand vibe and yielding?
-        auto mmfile = new MmFile(path.toNativeString());
-        scope(exit) destroy(mmfile);
-        auto bson = Bson(Bson.Type.object, assumeUnique(cast(ubyte[])mmfile[]));
-        auto response = deserializeBson!CachedHTTPResponse(bson);
+        try
+        {
+            // TODO: Any issues with using D MmFile instead of something that understand vibe and yielding?
+            auto mmfile = new MmFile(path.toNativeString());
+            scope(exit) destroy(mmfile);
+            auto bson = Bson(Bson.Type.object, assumeUnique(cast(ubyte[])mmfile[]));
+            auto response = deserializeBson!CachedHTTPResponse(bson);
 
-        hit_handler(response, cast(const(ubyte)[])mmfile[bson.data.length .. cast(uint)mmfile.length]);
+            hit_handler(response, cast(const(ubyte)[])mmfile[bson.data.length .. cast(uint)mmfile.length]);
 
-        return true;
+            return true;
+        }
+        // TODO: Catch a less general exception type... but MmFile seems to throw a windows-specific
+        // system exception on Windows and I'd rather not be *platform*-specific here.
+        catch (Exception e)
+        {
+            // Response not yet in the cache
+            return false;
+        }
     }
 
     // TODO: Some way to lock a specific item in the cache while it is initially being filled
@@ -78,16 +87,15 @@ class ResponseCache
     // Mapping of cache key -> file name
     private static Path cache_path(string key)
     {
-        // For now we go with a simple scheme of MD5 the key, then store it in "cache/AB/CD" where
-        // AB and CD are the first 4 digits of the hash (to make the file system a bit happier).
-        // TODO: For the case of steam it probably makes more sense to at least respect the URL portion that contains the APP ID
+        // For the case of steam it makes more sense to at least respect the URL portion that contains the APP ID
         // That way we retain the ability to manually clear out certain applications from the cache.
-        /*
-        string md5_string = toHexString(md5Of(key));
-        string path_string = format("cache/%s/%s/%s", md5_string[0..2], md5_string[2..4], md5_string);
-        */
         string path_string = "cache/" ~ key;
         return Path(path_string);
+
+        // More general sol'n: a simple scheme of MD5 the key, then store it in "cache/AB/CD" where
+        // AB and CD are the first 4 digits of the hash (to make the file system a bit happier).
+        //string md5_string = toHexString(md5Of(key));
+        //string path_string = format("cache/%s/%s/%s", md5_string[0..2], md5_string[2..4], md5_string);
     }
 
     // Our own version since vibe's puts this in the current working directory :S
