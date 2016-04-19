@@ -17,7 +17,7 @@ struct CachedHTTPResponse
 // The monolithic cache object that handles checking for requests and caching the results
 // NOTE: This object is intended to be thread safe (uses internal locking), and thus usage
 // with "__gshared" is likely.
-// TODO: This entire class is basically "static" right now since we (ab)use the file system
+// NOTE: This entire class is basically "static" right now since we (ab)use the file system
 // to do our locking and synchronization and so on. Could change the interface/design given that.
 class ResponseCache
 {

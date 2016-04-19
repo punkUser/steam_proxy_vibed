@@ -6,6 +6,7 @@ import std.typecons;
 
 __gshared ResponseCache g_response_cache;
 
+
 shared static this()
 {
     g_response_cache = new ResponseCache();
@@ -68,6 +69,7 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
     // Otherwise don't write any request body
 }
 
+
 void setup_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T body_reader, scope HTTPServerResponse res)
 {
     // Copy relevant response headers
@@ -91,6 +93,7 @@ void setup_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T
 
     res.writeBody(body_reader);
 }
+
 
 // If cache_key is empty, response will never be cached
 void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key = "")
@@ -145,6 +148,7 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
             else
             {
                 // Don't cache, just pass through response
+                // TODO: Should this count as a "BYPASS" instead of a "MISS"?
                 setup_response(upstream_res.statusCode, upstream_res.headers, upstream_res.bodyReader, res);
             }
         },
