@@ -54,7 +54,7 @@ class ResponseCache
         // Create temp file for caching the response.
         // NOTE: On Windows this seems to create the temporary file in the current directory...
         // This is non-ideal, so we may want to roll our own with std.file.tempDir or similar
-        auto file = createTempFile();
+        auto file = create_temporary_file();
         scope(failure) file.close();
 
         CachedHTTPResponse cached_response;
@@ -88,5 +88,19 @@ class ResponseCache
         */
         string path_string = "cache/" ~ key;
         return Path(path_string);
+    }
+
+    // Our own version since vibe's puts this in the current working directory :S
+    private static FileStream create_temporary_file()
+    {
+        import std.file : tempDir;
+        import std.conv : to;
+
+		char[L_tmpnam] tmp;
+		tmpnam(tmp.ptr);
+		auto tmpname = to!string(tmp.ptr);
+		if (tmpname.startsWith("\\")) tmpname = tmpname[1 .. $];
+		
+		return openFile(tempDir() ~ "/" ~ tmpname, FileMode.createTrunc);
     }
 };

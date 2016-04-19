@@ -6,14 +6,6 @@ import std.typecons;
 
 __gshared ResponseCache g_response_cache;
 
-enum UpstreamCacheStatus
-{
-    HIT = 0,
-    MISS_AND_CACHED,
-    MISS_AND_NOT_CACHED,
-    BYPASS,
-};
-
 shared static this()
 {
     g_response_cache = new ResponseCache();
@@ -24,6 +16,11 @@ shared static this()
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
     settings.options = HTTPServerOption.parseURL | HTTPServerOption.distribute;
+
+    // Log something sorta like standard Apache output, but doesn't need to be exact
+    settings.accessLogFormat = "%h - %u [%t] \"%r\" %s %b \"%{X-Cache-Status}o\" %v";
+    settings.accessLogFile = "access.log";
+    settings.accessLogToConsole = true;
 
 	listenHTTP(settings, router);
 }
@@ -96,23 +93,18 @@ void setup_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T
 }
 
 // If cache_key is empty, response will never be cached
-UpstreamCacheStatus upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key = "")
+void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key = "")
 {
-    // TODO: Detect and avoid proxy "loops" (i.e. requests back to ourself)
-    // Not sure how these are initially getting triggered, which also needs tracking down...
-
     URL url;
     url.schema = "http";
-    url.port = 80; // TODO: get from request somehow?
+    url.port = 80;
     url.host = req.host;
     url.localURI = req.requestURL;
 
     // Disable keep-alive for the moment - potentially just restrict the timeout in the future
     // TODO: Cache this settings object somewhere maybe - it's immutable really
     HTTPClientSettings settings = new HTTPClientSettings;
-    settings.defaultKeepAliveTimeout = 0.seconds; // closes connection immediately after receiving the data.
-
-    auto upstream_cache_status = UpstreamCacheStatus.MISS_AND_NOT_CACHED;
+    settings.defaultKeepAliveTimeout = 0.seconds;
 
     requestHTTP(url,
         (scope HTTPClientRequest upstream_req)
@@ -129,7 +121,6 @@ UpstreamCacheStatus upstream_request(scope HTTPServerRequest req, scope HTTPServ
             // to change.
 
             // Decide whether to cache this response
-            // NOTE: Logic based purely on the request should have been checked before calling
             bool cache =
                 (!cache_key.empty) &&
                 (req.method == HTTPMethod.GET) &&
@@ -150,8 +141,6 @@ UpstreamCacheStatus upstream_request(scope HTTPServerRequest req, scope HTTPServ
                         setup_response(response.status_code, response.headers, body_payload, res);
                     }
                 );
-
-                upstream_cache_status = UpstreamCacheStatus.MISS_AND_CACHED;
             }
             else
             {
@@ -161,16 +150,11 @@ UpstreamCacheStatus upstream_request(scope HTTPServerRequest req, scope HTTPServ
         },
         settings
     );
-
-    return upstream_cache_status;
 }
 
 
 void cached_proxy_request(scope HTTPServerRequest req, scope HTTPServerResponse res)
-{
-    bool response_written = false;
-    auto upstream_cache_status = UpstreamCacheStatus.BYPASS;
-
+{    
     // Decide whether to use cached responses for this request
     string cache_key = "";
     if (req.method == HTTPMethod.GET)
@@ -185,26 +169,20 @@ void cached_proxy_request(scope HTTPServerRequest req, scope HTTPServerResponse 
         auto found = g_response_cache.find(cache_key,
             (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
             {
-                upstream_cache_status = UpstreamCacheStatus.HIT;
+                res.headers["X-Cache-Status"] = "HIT";
                 setup_response(response.status_code, response.headers, body_payload, res);
-                response_written = true;
             }
         );
-    }
 
-    if (!response_written)
+        if (!found)
+        {
+            res.headers["X-Cache-Status"] = "MISS";
+            upstream_request(req, res, cache_key);
+        }
+    }
+    else
     {
-        // Otherwise forward the response upstream
-        upstream_cache_status = upstream_request(req, res, cache_key);
+        res.headers["X-Cache-Status"] = "BYPASS";
+        upstream_request(req, res);
     }
-
-    // Log something sorta like standard Apache output, but doesn't need to be exact
-    writefln("%s - - [%s] \"%s\" %s %s \"%s\" \"%s\"",
-             req.clientAddress.toAddressString(),
-             Clock.currTime().toSimpleString(),
-             req.toString(),
-             res.statusCode,
-             res.headers.get("Content-Length", "0"),
-             upstream_cache_status,
-             req.host);
 }
