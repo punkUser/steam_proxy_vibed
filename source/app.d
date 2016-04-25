@@ -20,7 +20,7 @@ shared static this()
 
     // Log something sorta like standard Apache output, but doesn't need to be exact
     settings.accessLogFormat = "%h - %u [%t] \"%r\" %s %b \"%{X-Cache-Status}o\" %v";
-    settings.accessLogFile = "access.log";
+    //settings.accessLogFile = "access.log";
     settings.accessLogToConsole = true;
 
 	listenHTTP(settings, router);
