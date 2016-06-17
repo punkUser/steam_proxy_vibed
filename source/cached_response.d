@@ -54,6 +54,14 @@ class ResponseCache
 
     // TODO: Some way to lock a specific item in the cache while it is initially being filled
     // to avoid redoing work if multiple people request the same data at once.
+    // NOTE: Without the locking, there is technically a very minor race here if two requests
+    // come in for the same data at once, both race to fill and copy the data into place,
+    // and the second copy fails due to the item being already opened for *read*.
+    // It's a pretty rare race though, and there's still no way to get data corruption.
+    // Catching and ignoring the exception on moveFile would be a sufficient workaround,
+    // although for our purposes failing the request (with exception) will generally cause
+    // the client to retry which works fine here too.
+    // 
     // NOTE: Destructively reads the body of the upstream response - thus the caller needs to
     // call "find" to grab that data from the cache again if necessary.
     public static void cache(string key, HTTPClientResponse upstream_res)
