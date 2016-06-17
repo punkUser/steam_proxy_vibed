@@ -3,9 +3,6 @@
 	"description": "A simple vibe.d Steam proxy cache.",
 	"copyright": "Copyright © 2016, Andrew Lauritzen",
 	"authors": ["Andrew Lauritzen"],
-	"subConfigurations": {
-		"vibe-d": "libevent",
-	},
 	"dependencies": {
 		"vibe-d": "~>0.7.28",
 	},

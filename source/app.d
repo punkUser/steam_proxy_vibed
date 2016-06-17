@@ -55,6 +55,9 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
     else
         upstream_req.headers["X-Forwarded-For"] = req.peer;
 
+    // This is our silly way of detecting recursion...
+    upstream_req.headers["X-Steam-Proxy-Version"] = "1"; // TODO if we care about version number properly
+
     // TODO: Could try the read whole body, write whole body strategy here too I guess...?
 
     // If they provide a content length, use it
@@ -98,6 +101,11 @@ void setup_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T
 // If cache_key is empty, response will never be cached
 void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key = "")
 {
+    // Detect recursion (ex. if someone navigates directly to the host proxy address)
+    // NOTE: This is not a completely robust test, but it works for our purposes
+    if ("X-Steam-Proxy-Version" in req.headers)
+        return; // This will result in an error page due to not writing a response
+
     URL url;
     url.schema = "http";
     url.port = 80;
