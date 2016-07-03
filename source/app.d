@@ -12,7 +12,8 @@ shared static this()
     g_response_cache = new ResponseCache();
 
     auto router = new URLRouter;
-    router.any("*", &cached_proxy_request);
+    router.any("/depot/*", &steam_depot);   // Send steam /depot files to the cache path
+    router.any("*", &uncached);             // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
 
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
@@ -29,19 +30,8 @@ shared static this()
 
 void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest upstream_req)
 {   
-    // Copy relevant request headers
     upstream_req.method = req.method;
-    foreach (key, value; req.headers)
-    {
-        // TODO: Remove any other fields? Transfer-Encoding?
-        // TODO: Any special handling of "Host" field? For now we'll just assume we can always pass on the original request one
-        // Some will just naturally get overwritten when we write the body
-        if (icmp2(key, "Connection") != 0 &&     // Connection strategy is peer to peer
-            icmp2(key, "Accept-Encoding") != 0)  // Similar with encoding strategy - we're going to decode in the middle
-        {
-            upstream_req.headers[key] = value;
-        }
-    }
+    upstream_req.headers = req.headers.dup;
 
     // Add standard proxy headers
     if (auto pri = "X-Real-IP" !in upstream_req.headers)
@@ -58,43 +48,51 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
     // This is our silly way of detecting recursion...
     upstream_req.headers["X-Steam-Proxy-Version"] = "1"; // TODO if we care about version number properly
 
-    // TODO: Could try the read whole body, write whole body strategy here too I guess...?
-
-    // If they provide a content length, use it
     if ("Content-Length" in req.headers)
-        upstream_req.writeBody(req.bodyReader, upstream_req.headers["Content-Length"].to!size_t());
+    {
+        // If they provide a content length, use it
+        auto length = upstream_req.headers["Content-Length"].to!size_t();
+        upstream_req.bodyWriter.write(req.bodyReader, length);
+    }
     else if (!req.bodyReader.empty)
     {
         // Chunked encoding... note that Steam servers don't seem too happy with this generally which
         // is why we try to avoid this path when proxying.
-        upstream_req.writeBody(req.bodyReader);
+        upstream_req.bodyWriter.write(req.bodyReader);
     }
-    // Otherwise don't write any request body
+    else
+    {
+        // Otherwise don't write any request body
+    }
 }
 
 
-void setup_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T body_reader, scope HTTPServerResponse res)
+void setup_cached_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T body_reader, scope HTTPServerResponse res,
+                              string cache_status = "")
 {
     // Copy relevant response headers
     res.statusCode = status_code;
+
+    // Can't just dup here since we need to dup each string; the response object passed in may be transiet (mmap'd file, etc)
+    res.headers = InetHeaderMap.init;
     foreach (key, value; upstream_headers)
     {
-        // TODO: Remove any other fields? Transfer-Encoding?
-        // Some will just naturally get overwritten when we write the body
-        if (icmp2(key, "Connection") != 0)
-        {
-            // NOTE: we need to dup the strings here as the response object passed in may be
-            // transient (i.e. memory mapped file, etc).
-            res.headers[key.idup] = value.idup;
-        }
+        //writefln("%s: %s", key, value); // DEBUG
+        res.headers[key.idup] = value.idup;
     }
 
-    if (res.isHeadResponse) {
+    if (!cache_status.empty)
+        res.headers["X-Cache-Status"] = cache_status;
+
+    if (res.isHeadResponse)
+    {
         res.writeVoidBody();
-        return;
     }
-
-    res.writeBody(body_reader);
+    else
+    {
+        // NOTE: writeRawBody would potentially be better here in the passthrough cases - might be worth specializing
+        res.bodyWriter.write(body_reader);
+    }
 }
 
 
@@ -111,11 +109,6 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
     url.port = 80;
     url.host = req.host;
     url.localURI = req.requestURL;
-
-    // Disable keep-alive for the moment - potentially just restrict the timeout in the future
-    // TODO: Cache this settings object somewhere maybe - it's immutable really
-    HTTPClientSettings settings = new HTTPClientSettings;
-    settings.defaultKeepAliveTimeout = 0.seconds;
 
     requestHTTP(url,
         (scope HTTPClientRequest upstream_req)
@@ -149,24 +142,21 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
                 auto found = g_response_cache.find(cache_key,
                     (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
                     {
-                        setup_response(response.status_code, response.headers, body_payload, res);
+                        setup_cached_response(response.status_code, response.headers, body_payload, res, "MISS");
                     }
                 );
             }
             else
             {
-                // Don't cache, just pass through response
-                // TODO: Should this count as a "BYPASS" instead of a "MISS"?
-                setup_response(upstream_res.statusCode, upstream_res.headers, upstream_res.bodyReader, res);
+                setup_cached_response(upstream_res.statusCode, upstream_res.headers, upstream_res.bodyReader, res, "BYPASS");
             }
         },
-        settings
     );
 }
 
 
-void cached_proxy_request(scope HTTPServerRequest req, scope HTTPServerResponse res)
-{    
+void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
+{
     // Decide whether to use cached responses for this request
     string cache_key = "";
     if (req.method == HTTPMethod.GET)
@@ -181,20 +171,21 @@ void cached_proxy_request(scope HTTPServerRequest req, scope HTTPServerResponse 
         auto found = g_response_cache.find(cache_key,
             (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
             {
-                res.headers["X-Cache-Status"] = "HIT";
-                setup_response(response.status_code, response.headers, body_payload, res);
+                setup_cached_response(response.status_code, response.headers, body_payload, res, "HIT");
             }
         );
 
         if (!found)
-        {
-            res.headers["X-Cache-Status"] = "MISS";
             upstream_request(req, res, cache_key);
-        }
     }
     else
     {
-        res.headers["X-Cache-Status"] = "BYPASS";
         upstream_request(req, res);
     }
+}
+
+// Any other uncached requests that we just want to pass through
+void uncached(scope HTTPServerRequest req, scope HTTPServerResponse res)
+{
+    upstream_request(req, res);
 }
