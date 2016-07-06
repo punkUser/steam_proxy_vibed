@@ -34,12 +34,15 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
     upstream_req.headers = req.headers.dup;
 
     // Add standard proxy headers
+    // NOTE: Disabled a few of these for now... none of them are really necessary for this application anyways
+    //    upstream_req.headers["X-Real-IP"] = req.clientAddress.toAddressString();
+    //if (auto pfh = "X-Forwarded-Host" !in upstream_req.headers) 
+    //    upstream_req.headers["X-Forwarded-Host"] = req.headers["Host"];
+    //if (auto pfp = "X-Forwarded-Proto" !in upstream_req.headers)
+    //    upstream_req.headers["X-Forwarded-Proto"] = req.tls ? "https" : "http";
+
     if (auto pri = "X-Real-IP" !in upstream_req.headers)
-        upstream_req.headers["X-Real-IP"] = req.clientAddress.toAddressString();
-    if (auto pfh = "X-Forwarded-Host" !in upstream_req.headers) 
-        upstream_req.headers["X-Forwarded-Host"] = req.headers["Host"];
-    if (auto pfp = "X-Forwarded-Proto" !in upstream_req.headers)
-        upstream_req.headers["X-Forwarded-Proto"] = req.tls ? "https" : "http";
+    // TODO: Updated to RFC7239 "Forwarded" standard header? https://tools.ietf.org/html/rfc7239
     if (auto pff = "X-Forwarded-For" in req.headers)
         upstream_req.headers["X-Forwarded-For"] = *pff ~ ", " ~ req.peer;
     else
@@ -187,5 +190,42 @@ void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
 // Any other uncached requests that we just want to pass through
 void uncached(scope HTTPServerRequest req, scope HTTPServerResponse res)
 {
-    upstream_request(req, res);
+    //upstream_request(req, res);
+
+    // Detect recursion (ex. if someone navigates directly to the host proxy address)
+    // NOTE: This is not a completely robust test, but it works for our purposes
+    if ("X-Steam-Proxy-Version" in req.headers)
+        return; // This will result in an error page due to not writing a response
+
+    URL url;
+    url.schema = "http";
+    url.port = 80;
+    url.host = req.host;
+    url.localURI = req.requestURL;
+
+    requestHTTP(url,
+        (scope HTTPClientRequest upstream_req)
+        {
+            setup_upstream_request(req, upstream_req);
+        },
+        (scope HTTPClientResponse upstream_res) 
+        {
+            res.statusCode = upstream_res.statusCode;
+            res.headers = upstream_res.headers.dup;
+
+            if (res.isHeadResponse)
+                res.writeVoidBody();
+            else if ("Content-Length" in upstream_res.headers)
+            {
+                auto size = upstream_res.headers["Content-Length"].to!size_t();
+				upstream_res.readRawBody((scope reader) {
+                    res.writeRawBody(reader, size);
+                });
+            }
+            else
+            {
+                res.bodyWriter.write(upstream_res.bodyReader);
+            }
+        },
+    );
 }
