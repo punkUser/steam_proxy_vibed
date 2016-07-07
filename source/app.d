@@ -11,9 +11,11 @@ shared static this()
 {
     g_response_cache = new ResponseCache();
 
+    // TODO: We really should have a "host" router here as well, but since we have no real intention of
+    // implementing a general purpose proxy, this is sufficient for the current steam server setup.
     auto router = new URLRouter;
-    router.any("/depot/*", &steam_depot);   // Send steam /depot files to the cache path
-    router.any("*", &uncached);             // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
+    router.get("/depot/*", &steam_depot);           // Send steam /depot files to the cache path
+    router.any("*", &uncached_upstream_request);    // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
 
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
@@ -35,14 +37,14 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
 
     // Add standard proxy headers
     // NOTE: Disabled a few of these for now... none of them are really necessary for this application anyways
-    //    upstream_req.headers["X-Real-IP"] = req.clientAddress.toAddressString();
     //if (auto pfh = "X-Forwarded-Host" !in upstream_req.headers) 
     //    upstream_req.headers["X-Forwarded-Host"] = req.headers["Host"];
     //if (auto pfp = "X-Forwarded-Proto" !in upstream_req.headers)
     //    upstream_req.headers["X-Forwarded-Proto"] = req.tls ? "https" : "http";
 
+    // TODO: Update to RFC7239 "Forwarded" header https://tools.ietf.org/html/rfc7239
     if (auto pri = "X-Real-IP" !in upstream_req.headers)
-    // TODO: Updated to RFC7239 "Forwarded" standard header? https://tools.ietf.org/html/rfc7239
+        upstream_req.headers["X-Real-IP"] = req.clientAddress.toAddressString();
     if (auto pff = "X-Forwarded-For" in req.headers)
         upstream_req.headers["X-Forwarded-For"] = *pff ~ ", " ~ req.peer;
     else
@@ -63,17 +65,14 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
         // is why we try to avoid this path when proxying.
         upstream_req.bodyWriter.write(req.bodyReader);
     }
-    else
-    {
-        // Otherwise don't write any request body
-    }
 }
 
 
-void setup_cached_response(T)(int status_code, const(InetHeaderMap) upstream_headers, T body_reader, scope HTTPServerResponse res,
-                              string cache_status = "")
+void setup_cached_response(int status_code, const(InetHeaderMap) upstream_headers,
+                           const(ubyte)[] body_payload,
+                           scope HTTPServerResponse res,
+                           string cache_status = "")
 {
-    // Copy relevant response headers
     res.statusCode = status_code;
 
     // Can't just dup here since we need to dup each string; the response object passed in may be transiet (mmap'd file, etc)
@@ -88,25 +87,33 @@ void setup_cached_response(T)(int status_code, const(InetHeaderMap) upstream_hea
         res.headers["X-Cache-Status"] = cache_status;
 
     if (res.isHeadResponse)
-    {
         res.writeVoidBody();
-    }
+    else
+        res.bodyWriter.write(body_payload);
+}
+
+
+void setup_bypass_response(scope HTTPClientResponse upstream_res, scope HTTPServerResponse res)
+{
+    res.statusCode = upstream_res.statusCode;
+    res.headers = upstream_res.headers.dup;
+
+    res.headers["X-Cache-Status"] = "BYPASS";
+
+    if (res.isHeadResponse)
+        res.writeVoidBody();
     else
     {
-        // NOTE: writeRawBody would potentially be better here in the passthrough cases - might be worth specializing
-        res.bodyWriter.write(body_reader);
+        // TODO: Can detect certain cases and use writeRawBody and so on, but this is
+        // generally more robust and doesn't seem to have failure cases or significant overhead yet
+        res.bodyWriter.write(upstream_res.bodyReader);
     }
 }
 
 
 // If cache_key is empty, response will never be cached
-void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key = "")
+void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key)
 {
-    // Detect recursion (ex. if someone navigates directly to the host proxy address)
-    // NOTE: This is not a completely robust test, but it works for our purposes
-    if ("X-Steam-Proxy-Version" in req.headers)
-        return; // This will result in an error page due to not writing a response
-
     URL url;
     url.schema = "http";
     url.port = 80;
@@ -124,7 +131,7 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
             // that we send to the client here. This means slightly more overhead as even cache
             // hits have to run through the logic below again, but it means that the data in the
             // cache is far less coupled to any logic changes in the proxy code. If this code
-            // eventually settings down and/or CPU overhead becomes an issue here, it's easy enough
+            // eventually settles down and/or CPU overhead becomes an issue here, it's easy enough
             // to change.
 
             // Decide whether to cache this response
@@ -148,54 +155,35 @@ void upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res,
                         setup_cached_response(response.status_code, response.headers, body_payload, res, "MISS");
                     }
                 );
+                assert(found);
             }
             else
             {
-                setup_cached_response(upstream_res.statusCode, upstream_res.headers, upstream_res.bodyReader, res, "BYPASS");
+                setup_bypass_response(upstream_res, res);
             }
         },
     );
 }
 
 
-void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
+bool is_proxy_recursive_loop(scope HTTPServerRequest req)
 {
-    // Decide whether to use cached responses for this request
-    string cache_key = "";
-    if (req.method == HTTPMethod.GET)
-    {
-        // Determine cache key
-        // For Steam, we just use the path portion of the request, not host (they are mirrors) or query params (per-user security stuff)
-        // TODO: Obviously we should constrain/specialize this logic for just steam requests for robustness even though
-        // we have no intention of implementing a general-purpose proxy cache here.
-        cache_key = "steam/" ~ req.path;
-
-        // Check if we have it cached already
-        auto found = g_response_cache.find(cache_key,
-            (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
-            {
-                setup_cached_response(response.status_code, response.headers, body_payload, res, "HIT");
-            }
-        );
-
-        if (!found)
-            upstream_request(req, res, cache_key);
-    }
-    else
-    {
-        upstream_request(req, res);
-    }
-}
-
-// Any other uncached requests that we just want to pass through
-void uncached(scope HTTPServerRequest req, scope HTTPServerResponse res)
-{
-    //upstream_request(req, res);
-
     // Detect recursion (ex. if someone navigates directly to the host proxy address)
     // NOTE: This is not a completely robust test, but it works for our purposes
     if ("X-Steam-Proxy-Version" in req.headers)
-        return; // This will result in an error page due to not writing a response
+    {
+        writeln("LOOP");
+        return true;
+    }
+    else
+        return false;
+}
+
+
+// Any other uncached requests that we just want to pass through
+void uncached_upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res)
+{
+    if (is_proxy_recursive_loop(req)) return;
 
     URL url;
     url.schema = "http";
@@ -210,22 +198,29 @@ void uncached(scope HTTPServerRequest req, scope HTTPServerResponse res)
         },
         (scope HTTPClientResponse upstream_res) 
         {
-            res.statusCode = upstream_res.statusCode;
-            res.headers = upstream_res.headers.dup;
-
-            if (res.isHeadResponse)
-                res.writeVoidBody();
-            else if ("Content-Length" in upstream_res.headers)
-            {
-                auto size = upstream_res.headers["Content-Length"].to!size_t();
-				upstream_res.readRawBody((scope reader) {
-                    res.writeRawBody(reader, size);
-                });
-            }
-            else
-            {
-                res.bodyWriter.write(upstream_res.bodyReader);
-            }
+            setup_bypass_response(upstream_res, res);
         },
     );
+}
+
+
+
+void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
+{
+    if (is_proxy_recursive_loop(req)) return;
+
+    // For Steam, we just use the path portion of the request, not host (they are mirrors)
+    // or query params (per-user security stuff).
+    string cache_key = "steam/" ~ req.path;
+
+    // Check if we have it cached already
+    auto found = g_response_cache.find(cache_key,
+        (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
+        {
+            setup_cached_response(response.status_code, response.headers, body_payload, res, "HIT");
+        }
+    );
+
+    if (!found)
+        cached_upstream_request(req, res, cache_key);
 }
