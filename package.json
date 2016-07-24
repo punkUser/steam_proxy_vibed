@@ -4,7 +4,7 @@
 	"copyright": "Copyright © 2016, Andrew Lauritzen",
 	"authors": ["Andrew Lauritzen"],
 	"dependencies": {
-		"vibe-d": "~>0.7.28",
+		"vibe-d": "~>0.7.29",
 	},
 	"versions": ["VibeDefaultMain"],
 }

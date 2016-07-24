@@ -1,15 +1,23 @@
 import cached_response;
+import upstream_link_aggregator;
 
 import vibe.d;
 import std.stdio;
 import std.typecons;
+import std.algorithm;
 
 __gshared ResponseCache g_response_cache;
+__gshared UpstreamLinkAggregator g_upstream_link_aggregator;
 
 
 shared static this()
 {
+    // Read command line arguments
+    string upstream_address_list = "";
+    readOption("upstream_interfaces|ui", &upstream_address_list, "Enables upstream link aggregation using the comma-separated list of interface addresses.");
+
     g_response_cache = new ResponseCache();
+    g_upstream_link_aggregator = new UpstreamLinkAggregator(split(upstream_address_list, ","));
 
     // TODO: We really should have a "host" router here as well, but since we have no real intention of
     // implementing a general purpose proxy, this is sufficient for the current steam server setup.
@@ -119,6 +127,14 @@ void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerRespon
     url.port = 80;
     url.host = req.host;
     url.localURI = req.requestURL;
+    
+    // TODO: Could enable/disable use of link aggregation per-request depending on the route, etc.
+    // For now we only have steam, for which even our simple endpoint unaware link aggregator works fine.
+    auto upstream_interface = g_upstream_link_aggregator.acquire_interface();
+    scope(exit) g_upstream_link_aggregator.release_interface(upstream_interface);
+
+    HTTPClientSettings settings = new HTTPClientSettings;
+    settings.networkInterface = upstream_interface.network_address;
 
     requestHTTP(url,
         (scope HTTPClientRequest upstream_req)
@@ -162,17 +178,18 @@ void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerRespon
                 setup_bypass_response(upstream_res, res);
             }
         },
+        settings
     );
 }
 
 
-bool is_proxy_recursive_loop(scope HTTPServerRequest req)
+bool check_proxy_recursive_loop(scope HTTPServerRequest req, scope HTTPServerResponse res)
 {
     // Detect recursion (ex. if someone navigates directly to the host proxy address)
     // NOTE: This is not a completely robust test, but it works for our purposes
     if ("X-Steam-Proxy-Version" in req.headers)
     {
-        writeln("LOOP");
+        res.headers["X-Cache-Status"] = "PROXY-LOOP";
         return true;
     }
     else
@@ -183,14 +200,14 @@ bool is_proxy_recursive_loop(scope HTTPServerRequest req)
 // Any other uncached requests that we just want to pass through
 void uncached_upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res)
 {
-    if (is_proxy_recursive_loop(req)) return;
+    if (check_proxy_recursive_loop(req, res)) return;
 
     URL url;
     url.schema = "http";
     url.port = 80;
     url.host = req.host;
     url.localURI = req.requestURL;
-
+    
     requestHTTP(url,
         (scope HTTPClientRequest upstream_req)
         {
@@ -207,7 +224,7 @@ void uncached_upstream_request(scope HTTPServerRequest req, scope HTTPServerResp
 
 void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
 {
-    if (is_proxy_recursive_loop(req)) return;
+    if (check_proxy_recursive_loop(req, res)) return;
 
     // For Steam, we just use the path portion of the request, not host (they are mirrors)
     // or query params (per-user security stuff).
