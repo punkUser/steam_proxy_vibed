@@ -9,12 +9,13 @@ import std.algorithm;
 __gshared ResponseCache g_response_cache;
 __gshared UpstreamLinkAggregator g_upstream_link_aggregator;
 
-
 shared static this()
 {
     // Read command line arguments
     string upstream_address_list = "";
     readOption("upstream_interfaces|ui", &upstream_address_list, "Enables upstream link aggregation using the comma-separated list of interface addresses.");
+    bool enable_cache = true;
+    readOption("cache|c", &enable_cache, "Enables or disables proxy cache.");
 
     g_response_cache = new ResponseCache();
     g_upstream_link_aggregator = new UpstreamLinkAggregator(split(upstream_address_list, ","));
@@ -22,7 +23,8 @@ shared static this()
     // TODO: We really should have a "host" router here as well, but since we have no real intention of
     // implementing a general purpose proxy, this is sufficient for the current steam server setup.
     auto router = new URLRouter;
-    router.get("/depot/*", &steam_depot);           // Send steam /depot files to the cache path
+    if (enable_cache)                               // Don't even add any caching routes if caching is disabled
+        router.get("/depot/*", &steam_depot);       // Send steam /depot files to the cache path
     router.any("*", &uncached_upstream_request);    // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
 
 	auto settings = new HTTPServerSettings;
@@ -31,7 +33,7 @@ shared static this()
 
     // Log something sorta like standard Apache output, but doesn't need to be exact
     settings.accessLogFormat = "%h - %u [%t] \"%r\" %s %b \"%{X-Cache-Status}o\" %v";
-    //settings.accessLogFile = "access.log";
+    //settings.accessLogFile = "access.log"; // Seems slightly buggy with distribute enabled
     settings.accessLogToConsole = true;
 
 	listenHTTP(settings, router);
@@ -76,10 +78,8 @@ void setup_upstream_request(scope HTTPServerRequest req, scope HTTPClientRequest
 }
 
 
-void setup_cached_response(int status_code, const(InetHeaderMap) upstream_headers,
-                           const(ubyte)[] body_payload,
-                           scope HTTPServerResponse res,
-                           string cache_status = "")
+void setup_cached_response_headers(int status_code, const(InetHeaderMap) upstream_headers, string cache_status,
+                                   scope HTTPServerResponse res)
 {
     res.statusCode = status_code;
 
@@ -93,11 +93,6 @@ void setup_cached_response(int status_code, const(InetHeaderMap) upstream_header
 
     if (!cache_status.empty)
         res.headers["X-Cache-Status"] = cache_status;
-
-    if (res.isHeadResponse)
-        res.writeVoidBody();
-    else
-        res.bodyWriter.write(body_payload);
 }
 
 
@@ -120,7 +115,7 @@ void setup_bypass_response(scope HTTPClientResponse upstream_res, scope HTTPServ
 
 
 // If cache_key is empty, response will never be cached
-void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key)
+void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerResponse res, string cache_key, bool upstream_aggregation = false)
 {
     URL url;
     url.schema = "http";
@@ -128,13 +123,19 @@ void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerRespon
     url.host = req.host;
     url.localURI = req.requestURL;
     
+    HTTPClientSettings settings = new HTTPClientSettings;
+
     // TODO: Could enable/disable use of link aggregation per-request depending on the route, etc.
     // For now we only have steam, for which even our simple endpoint unaware link aggregator works fine.
-    auto upstream_interface = g_upstream_link_aggregator.acquire_interface();
-    scope(exit) g_upstream_link_aggregator.release_interface(upstream_interface);
-
-    HTTPClientSettings settings = new HTTPClientSettings;
-    settings.networkInterface = upstream_interface.network_address;
+    Nullable!UpstreamInterface upstream_interface;
+    if (upstream_aggregation) {
+        upstream_interface = g_upstream_link_aggregator.acquire_interface();
+        settings.networkInterface = upstream_interface.network_address;
+    }
+    scope(exit) {
+        if (!upstream_interface.isNull())
+            g_upstream_link_aggregator.release_interface(upstream_interface);
+    }
 
     requestHTTP(url,
         (scope HTTPClientRequest upstream_req)
@@ -161,17 +162,8 @@ void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerRespon
 
             if (cache)
             {
-                // NOTE: This is *destructive* on the body data in upstream_res!
-                g_response_cache.cache(cache_key, upstream_res);
-
-                // Should now be in the cache, so reload it from there for this response
-                auto found = g_response_cache.find(cache_key,
-                    (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
-                    {
-                        setup_cached_response(response.status_code, response.headers, body_payload, res, "MISS");
-                    }
-                );
-                assert(found);
+                setup_cached_response_headers(upstream_res.statusCode, upstream_res.headers, "MISS", res);
+                g_response_cache.cache_and_write_response_body(cache_key, upstream_res, res);
             }
             else
             {
@@ -234,10 +226,15 @@ void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
     auto found = g_response_cache.find(cache_key,
         (scope CachedHTTPResponse response, const(ubyte)[] body_payload)
         {
-            setup_cached_response(response.status_code, response.headers, body_payload, res, "HIT");
+            setup_cached_response_headers(response.status_code, response.headers, "HIT", res);
+            res.bodyWriter.write(body_payload);
         }
     );
 
     if (!found)
-        cached_upstream_request(req, res, cache_key);
+    {
+        // Enable simple upstream aggregation (if available) since Steam depot servers
+        // are not currently endpoint sensitive.
+        cached_upstream_request(req, res, cache_key, true);
+    }
 }

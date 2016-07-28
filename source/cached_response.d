@@ -6,7 +6,9 @@ import std.file : mkdirRecurse;
 import std.exception;
 import std.mmfile;
 import core.memory;
+
 import vibe.d;
+import vibe.stream.multicast;
 
 struct CachedHTTPResponse
 {
@@ -60,10 +62,11 @@ class ResponseCache
     // Catching and ignoring the exception on moveFile would be a sufficient workaround,
     // although for our purposes failing the request (with exception) will generally cause
     // the client to retry which works fine here too.
-    // 
-    // NOTE: Destructively reads the body of the upstream response - thus the caller needs to
-    // call "find" to grab that data from the cache again if necessary.
-    public static void cache(string key, HTTPClientResponse upstream_res)
+    //
+    // NOTE: Will also write the response body to "res", since it destructively reads the body
+    // from upstream_res. Headers and other parameters in "res" should be set up by the client
+    // prior to calling this as desired.
+    public static void cache_and_write_response_body(string key, scope HTTPClientResponse upstream_res, scope HTTPServerResponse res)
     {
         // TODO: Handle races or existence of file
 
@@ -79,7 +82,10 @@ class ResponseCache
         auto bson = cached_response.serializeToBson();
 
         file.write(bson.data);
-        file.write(upstream_res.bodyReader);
+
+        // Multicast the body both to the file and the client response
+        auto multicast_output = new MulticastStream(file, res.bodyWriter);
+        multicast_output.write(upstream_res.bodyReader);
 
         auto temp_file_path = file.path;
         file.close();
