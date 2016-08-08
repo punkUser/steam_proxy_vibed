@@ -18,6 +18,8 @@ shared static this()
     readOption("upstream_interfaces|ui", &upstream_address_list, "Enables upstream link aggregation using the comma-separated list of interface addresses.");
     bool enable_cache = true;
     readOption("cache|c", &enable_cache, "Enables or disables proxy cache.");
+    bool enable_multithreading = true;
+    readOption("multithread|mt", &enable_multithreading, "Enables or disables multithreading.");
 
     g_response_cache = new ResponseCache();
     g_upstream_link_aggregator = new UpstreamLinkAggregator(split(upstream_address_list, ","));
@@ -30,7 +32,9 @@ shared static this()
 
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
-    settings.options = HTTPServerOption.parseURL;// | HTTPServerOption.distribute;
+    settings.options = HTTPServerOption.parseURL;
+    if (enable_multithreading)
+        settings.options |= HTTPServerOption.distribute;
 
     // Log something sorta like standard Apache output, but doesn't need to be exact
     settings.accessLogFormat = "%h - %u [%t] \"%r\" %s %b \"%{X-Cache-Status}o\" %v";
