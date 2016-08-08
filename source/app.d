@@ -11,6 +11,8 @@ __gshared UpstreamLinkAggregator g_upstream_link_aggregator;
 
 shared static this()
 {
+    //setLogLevel(LogLevel.debugV);
+
     // Read command line arguments
     string upstream_address_list = "";
     readOption("upstream_interfaces|ui", &upstream_address_list, "Enables upstream link aggregation using the comma-separated list of interface addresses.");
@@ -23,13 +25,12 @@ shared static this()
     // TODO: We really should have a "host" router here as well, but since we have no real intention of
     // implementing a general purpose proxy, this is sufficient for the current steam server setup.
     auto router = new URLRouter;
-    if (enable_cache)                               // Don't even add any caching routes if caching is disabled
-        router.get("/depot/*", &steam_depot);       // Send steam /depot files to the cache path
-    router.any("*", &uncached_upstream_request);    // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
+    router.get("/depot/*", enable_cache ? &steam_depot : &steam_depot_uncached);    // Send steam /depot files to the cache path
+    router.any("*", &uncached_upstream_request);                                    // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
 
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
-    settings.options = HTTPServerOption.parseURL | HTTPServerOption.distribute;
+    settings.options = HTTPServerOption.parseURL;// | HTTPServerOption.distribute;
 
     // Log something sorta like standard Apache output, but doesn't need to be exact
     settings.accessLogFormat = "%h - %u [%t] \"%r\" %s %b \"%{X-Cache-Status}o\" %v";
@@ -237,4 +238,13 @@ void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
         // are not currently endpoint sensitive.
         cached_upstream_request(req, res, cache_key, true);
     }
+}
+
+void steam_depot_uncached(scope HTTPServerRequest req, scope HTTPServerResponse res)
+{
+    if (check_proxy_recursive_loop(req, res)) return;
+
+    // Enable simple upstream aggregation (if available) since Steam depot servers
+    // are not currently endpoint sensitive.
+    cached_upstream_request(req, res, "", true);
 }
