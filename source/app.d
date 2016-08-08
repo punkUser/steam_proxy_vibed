@@ -19,7 +19,7 @@ shared static this()
     bool enable_cache = true;
     readOption("cache|c", &enable_cache, "Enables or disables proxy cache.");
     bool enable_multithreading = true;
-    readOption("multithread|mt", &enable_multithreading, "Enables or disables multithreading.");
+    readOption("multithread|m", &enable_multithreading, "Enables or disables multithreading.");
 
     g_response_cache = new ResponseCache();
     g_upstream_link_aggregator = new UpstreamLinkAggregator(split(upstream_address_list, ","));
