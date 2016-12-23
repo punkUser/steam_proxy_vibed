@@ -1,5 +1,4 @@
 import cached_response;
-import upstream_link_aggregator;
 
 import vibe.d;
 import std.stdio;
@@ -7,28 +6,25 @@ import std.typecons;
 import std.algorithm;
 
 __gshared ResponseCache g_response_cache;
-__gshared UpstreamLinkAggregator g_upstream_link_aggregator;
 
 shared static this()
 {
     //setLogLevel(LogLevel.debugV);
 
     // Read command line arguments
-    string upstream_address_list = "";
-    readOption("upstream_interfaces|ui", &upstream_address_list, "Enables upstream link aggregation using the comma-separated list of interface addresses.");
     bool enable_cache = true;
     readOption("cache|c", &enable_cache, "Enables or disables proxy cache.");
     bool enable_multithreading = true;
     readOption("multithread|m", &enable_multithreading, "Enables or disables multithreading.");
 
     g_response_cache = new ResponseCache();
-    g_upstream_link_aggregator = new UpstreamLinkAggregator(split(upstream_address_list, ","));
 
     // TODO: We really should have a "host" router here as well, but since we have no real intention of
     // implementing a general purpose proxy, this is sufficient for the current steam server setup.
     auto router = new URLRouter;
-    router.get("/depot/*", enable_cache ? &steam_depot : &steam_depot_uncached);    // Send steam /depot files to the cache path
-    router.any("*", &uncached_upstream_request);                                    // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
+    if (enable_cache)
+        router.get("/depot/*", &steam_depot);       // Send steam /depot files to the cache path
+    router.any("*", &uncached_upstream_request);    // Everything else just pass through (broadcasting, chat, etc. is on the same hosts)
 
 	auto settings = new HTTPServerSettings;
 	settings.port = 80;
@@ -130,18 +126,6 @@ void cached_upstream_request(scope HTTPServerRequest req, scope HTTPServerRespon
     
     HTTPClientSettings settings = new HTTPClientSettings;
 
-    // TODO: Could enable/disable use of link aggregation per-request depending on the route, etc.
-    // For now we only have steam, for which even our simple endpoint unaware link aggregator works fine.
-    Nullable!UpstreamInterface upstream_interface;
-    if (upstream_aggregation) {
-        upstream_interface = g_upstream_link_aggregator.acquire_interface();
-        settings.networkInterface = upstream_interface.network_address;
-    }
-    scope(exit) {
-        if (!upstream_interface.isNull())
-            g_upstream_link_aggregator.release_interface(upstream_interface);
-    }
-
     requestHTTP(url,
         (scope HTTPClientRequest upstream_req)
         {
@@ -242,13 +226,4 @@ void steam_depot(scope HTTPServerRequest req, scope HTTPServerResponse res)
         // are not currently endpoint sensitive.
         cached_upstream_request(req, res, cache_key, true);
     }
-}
-
-void steam_depot_uncached(scope HTTPServerRequest req, scope HTTPServerResponse res)
-{
-    if (check_proxy_recursive_loop(req, res)) return;
-
-    // Enable simple upstream aggregation (if available) since Steam depot servers
-    // are not currently endpoint sensitive.
-    cached_upstream_request(req, res, "", true);
 }
